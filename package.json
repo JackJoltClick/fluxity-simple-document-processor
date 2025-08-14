@@ -1,0 +1,26 @@
+{
+  "name": "fluxity-simple-processor",
+  "version": "1.0.0",
+  "description": "Secure enhanced document processor - Textract + GPT-4 with comprehensive validation",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "package": "npm run build && cp package*.json dist/ && cd dist && zip -r ../deployment.zip . && cd ..",
+    "deploy": "./deploy.sh"
+  },
+  "dependencies": {
+    "@aws-sdk/client-textract": "^3.645.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "node-fetch": "^2.6.7",
+    "openai": "^4.52.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.143",
+    "@types/node": "^20.11.5",
+    "@types/node-fetch": "^2.6.11",
+    "typescript": "^5.3.3"
+  }
+}
