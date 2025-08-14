@@ -361,19 +361,26 @@ function extractTable(tableBlock: any, cellMap: Map<any, any>, blockMap: Map<any
 
 
 /**
- * Process document with GPT-4 using comprehensive extracted data
+ * Process document with GPT-4 using comprehensive extracted data and smart rules
  */
 async function processWithGPT4(
   documentUrl: string, 
   extractedData: ExtractedData,
-  schema?: any
+  schema?: any,
+  smartRules?: any[]
 ): Promise<ProcessedDocument> {
   console.log('🤖 Processing with GPT-4...');
   
   const isPDF = documentUrl.toLowerCase().includes('.pdf');
   const isImage = /\.(jpg|jpeg|png|webp|gif)/i.test(documentUrl.toLowerCase());
   
-  // Build system prompt with ALL extracted data
+  // Organize smart rules by category
+  const glRules = smartRules?.filter(r => r.category === 'gl_assignment') || [];
+  const costCenterRules = smartRules?.filter(r => r.category === 'cost_center') || [];
+  const extractionHints = smartRules?.filter(r => r.category === 'extraction_hint') || [];
+  const validationRules = smartRules?.filter(r => r.category === 'validation') || [];
+  
+  // Build system prompt with ALL extracted data AND smart rules
   const systemPrompt = `You are an expert document processor. Extract and map data from the document using ALL the information provided below.
 
 ${schema ? `Map to these specific fields:
@@ -389,6 +396,26 @@ ${JSON.stringify(schema.columns?.map((c: any) => c.name) || [], null, 2)}` :
 - tax_code
 - cost_center
 - gl_account`}
+
+${extractionHints.length > 0 ? `
+EXTRACTION HINTS (How to find data in this type of document):
+${extractionHints.map(rule => `- ${rule.rule_text}`).join('\n')}
+` : ''}
+
+${glRules.length > 0 ? `
+GL ASSIGNMENT RULES (Apply these rules to determine GL codes):
+${glRules.map(rule => `- ${rule.rule_text}`).join('\n')}
+` : ''}
+
+${costCenterRules.length > 0 ? `
+COST CENTER RULES (Apply these rules to determine cost centers):
+${costCenterRules.map(rule => `- ${rule.rule_text}`).join('\n')}
+` : ''}
+
+${validationRules.length > 0 ? `
+VALIDATION RULES (Ensure extracted data meets these requirements):
+${validationRules.map(rule => `- ${rule.rule_text}`).join('\n')}
+` : ''}
 
 DOCUMENT STRUCTURE:
 ${extractedData.layout.titles.length > 0 ? `- Title(s): ${extractedData.layout.titles.join(', ')}` : ''}
@@ -568,23 +595,45 @@ export async function processDocument(jobData: JobData): Promise<void> {
       schema = schemaData;
     }
     
+    // Get user's smart rules
+    const { data: smartRules } = await supabase
+      .from('smart_rules')
+      .select('*')
+      .eq('user_id', jobData.userId)
+      .eq('is_active', true)
+      .order('category', { ascending: true });
+    
+    console.log(`🎯 Found ${smartRules?.length || 0} active smart rules for user`);
+    
     // Step 1: Extract comprehensive data with Textract
     const extractedData = await extractText(jobData.fileUrl);
     
-    // Step 2: Process with GPT-4 using all extracted data
-    const processed = await processWithGPT4(jobData.fileUrl, extractedData, schema);
+    // Step 2: Process with GPT-4 using all extracted data AND smart rules
+    const processed = await processWithGPT4(jobData.fileUrl, extractedData, schema, smartRules || undefined);
+    
+    // Update usage counts for smart rules (if any were used)
+    if (smartRules && smartRules.length > 0) {
+      console.log('📊 Updating smart rule usage counts...');
+      await Promise.all(smartRules.map(rule => 
+        supabase
+          .from('smart_rules')
+          .update({ usage_count: (rule.usage_count || 0) + 1 })
+          .eq('id', rule.id)
+      ));
+    }
     
     // Step 3: Save results with enriched metadata
     const { error } = await supabase
       .from('documents')
       .update({
         status: 'completed',
-        extraction_method: 'enhanced-textract-gpt4',
+        extraction_method: 'enhanced-textract-gpt4-smart-rules',
         extracted_data: {
           fields: processed.fields,
           metadata: {
-            extraction_method: 'enhanced-textract-gpt4',
+            extraction_method: 'enhanced-textract-gpt4-smart-rules',
             schema_used: schema?.name || 'default-accounting',
+            smart_rules_applied: smartRules?.length || 0,
             confidence: processed.confidence,
             processing_time_ms: Date.now() - startTime,
             textract_features: {
