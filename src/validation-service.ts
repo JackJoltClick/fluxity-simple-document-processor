@@ -208,17 +208,28 @@ export class ValidationService {
       return [];
     }
 
-    return data || [];
+    return (data || []) as MasterDataItem[];
   }
 
   // Validate a single field against master data
   async validateField(
-    extractedValue: string | null,
+    extractedValue: any,
     fieldName: string,
     clientId: string,
     documentContext?: any
   ): Promise<ValidationResult> {
-    if (!extractedValue) {
+    // Handle different value formats
+    let actualValue: string | null = null;
+    
+    if (extractedValue && typeof extractedValue === 'object' && 'value' in extractedValue) {
+      // Handle { value: x, confidence: y } format
+      actualValue = extractedValue.value;
+    } else if (extractedValue != null) {
+      // Handle direct values
+      actualValue = String(extractedValue);
+    }
+    
+    if (!actualValue || actualValue === '') {
       return {
         field: fieldName,
         extracted_value: '',
@@ -251,7 +262,7 @@ export class ValidationService {
     if (masterData.length === 0) {
       return {
         field: fieldName,
-        extracted_value: extractedValue,
+        extracted_value: actualValue,
         matched_code: null,
         matched_name: null,
         confidence: 0,
@@ -262,14 +273,14 @@ export class ValidationService {
 
     // Check for exact match first
     const exactMatch = masterData.find(item => 
-      item.code.toLowerCase() === extractedValue.toLowerCase() ||
-      item.name.toLowerCase() === extractedValue.toLowerCase()
+      item.code.toLowerCase() === actualValue.toLowerCase() ||
+      item.name.toLowerCase() === actualValue.toLowerCase()
     );
 
     if (exactMatch) {
       return {
         field: fieldName,
-        extracted_value: extractedValue,
+        extracted_value: actualValue,
         matched_code: exactMatch.code,
         matched_name: exactMatch.name,
         confidence: 100,
@@ -280,10 +291,10 @@ export class ValidationService {
 
     // Fuzzy match against names
     const choices = masterData.map(item => item.name);
-    const fuzzyMatches = this.rapidFuzz(extractedValue, choices, 20);
+    const fuzzyMatches = this.rapidFuzz(actualValue, choices, 20);
 
     // Create alternatives array
-    const alternatives = fuzzyMatches.map(([name, score]) => {
+    const alternatives = fuzzyMatches.map(([name, score]: [string, number]) => {
       const item = masterData.find(i => i.name === name)!;
       return {
         code: item.code,
@@ -296,7 +307,7 @@ export class ValidationService {
     if (alternatives.length > 0 && alternatives[0].score > 85) {
       return {
         field: fieldName,
-        extracted_value: extractedValue,
+        extracted_value: actualValue,
         matched_code: alternatives[0].code,
         matched_name: alternatives[0].name,
         confidence: alternatives[0].score,
@@ -308,7 +319,7 @@ export class ValidationService {
     // For medium confidence matches, use GPT-4 to pick the best
     if (alternatives.length > 0 && alternatives[0].score > 60) {
       const gptSelection = await this.selectBestMatchWithGPT(
-        extractedValue,
+        actualValue,
         alternatives.slice(0, 10),
         fieldName,
         documentContext
@@ -317,12 +328,12 @@ export class ValidationService {
       if (gptSelection) {
         return {
           field: fieldName,
-          extracted_value: extractedValue,
+          extracted_value: actualValue,
           matched_code: gptSelection.code,
           matched_name: gptSelection.name,
           confidence: gptSelection.confidence,
           status: gptSelection.confidence > 75 ? 'fuzzy_medium' : 'fuzzy_low',
-          alternatives: alternatives.filter(a => a.code !== gptSelection.code).slice(0, 5)
+          alternatives: alternatives.filter((a: any) => a.code !== gptSelection.code).slice(0, 5)
         };
       }
     }
@@ -330,7 +341,7 @@ export class ValidationService {
     // No good match found
     return {
       field: fieldName,
-      extracted_value: extractedValue,
+      extracted_value: actualValue,
       matched_code: alternatives[0]?.code || null,
       matched_name: alternatives[0]?.name || null,
       confidence: alternatives[0]?.score || 0,

@@ -66,6 +66,7 @@ interface JobData {
   fileUrl: string;
   filename: string;
   receiptHandle?: string;
+  clientId?: string;
 }
 
 interface ProcessedDocument {
