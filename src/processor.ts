@@ -18,6 +18,7 @@ import { SQSEvent } from 'aws-lambda';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import fetch from 'node-fetch';
+import { createValidationService } from './validation-service';
 
 // Secure environment variable loading with validation
 function getRequiredEnvVar(name: string): string {
@@ -45,6 +46,7 @@ try {
 const textract = new TextractClient({ region: AWS_REGION });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const validationService = createValidationService(SUPABASE_URL, SUPABASE_SERVICE_KEY, OPENAI_API_KEY);
 
 // Configuration constants
 const CONFIG = {
@@ -611,6 +613,45 @@ export async function processDocument(jobData: JobData): Promise<void> {
     // Step 2: Process with GPT-4 using all extracted data AND smart rules
     const processed = await processWithGPT4(jobData.fileUrl, extractedData, schema, smartRules || undefined);
     
+    // Step 3: Validate fields against ERP master data
+    console.log('🔍 Validating fields against ERP master data...');
+    
+    // Use test client ID for now (in production, get from job data or client association)
+    const clientId = jobData.clientId || '00000000-0000-0000-0000-000000000000';
+    
+    const validationResults = await validationService.validateDocumentFields(
+      processed.fields,
+      clientId
+    );
+    
+    // Save validation results
+    await validationService.saveValidationResults(jobData.documentId, validationResults);
+    
+    // Merge validation results into fields (add matched codes where confident)
+    const validatedFields = { ...processed.fields };
+    for (const [fieldName, validation] of Object.entries(validationResults)) {
+      if (validation.confidence > 85 && validation.matched_code) {
+        // High confidence - use the matched code
+        validatedFields[fieldName] = {
+          value: validation.matched_code,
+          original_value: validation.extracted_value,
+          matched_name: validation.matched_name,
+          confidence: validation.confidence / 100,
+          validation_status: validation.status
+        };
+      } else if (validation.matched_code) {
+        // Lower confidence - keep original but add suggestion
+        validatedFields[fieldName] = {
+          value: validation.extracted_value,
+          suggested_code: validation.matched_code,
+          suggested_name: validation.matched_name,
+          confidence: validation.confidence / 100,
+          validation_status: validation.status,
+          needs_review: true
+        };
+      }
+    }
+    
     // Update usage counts for smart rules (if any were used)
     if (smartRules && smartRules.length > 0) {
       console.log('📊 Updating smart rule usage counts...');
@@ -622,20 +663,23 @@ export async function processDocument(jobData: JobData): Promise<void> {
       ));
     }
     
-    // Step 3: Save results with enriched metadata
+    // Step 4: Save results with enriched metadata and validation
     const { error } = await supabase
       .from('documents')
       .update({
         status: 'completed',
-        extraction_method: 'enhanced-textract-gpt4-smart-rules',
+        extraction_method: 'enhanced-textract-gpt4-validation',
         extracted_data: {
-          fields: processed.fields,
+          fields: validatedFields,
           metadata: {
-            extraction_method: 'enhanced-textract-gpt4-smart-rules',
+            extraction_method: 'enhanced-textract-gpt4-validation',
             schema_used: schema?.name || 'default-accounting',
             smart_rules_applied: smartRules?.length || 0,
             confidence: processed.confidence,
             processing_time_ms: Date.now() - startTime,
+            validation_performed: true,
+            fields_validated: Object.keys(validationResults).length,
+            fields_matched: Object.values(validationResults).filter((v: any) => v.matched_code).length,
             textract_features: {
               key_value_pairs: Object.keys(extractedData.keyValues).length,
               tables_found: extractedData.tables.length,
@@ -649,8 +693,9 @@ export async function processDocument(jobData: JobData): Promise<void> {
           }
         },
         full_text: processed.full_text,
-        accounting_status: determineStatus(processed.fields),
-        extraction_cost: 0.04, // Slightly higher with more features
+        accounting_status: determineStatus(validatedFields),
+        extraction_cost: 0.045, // Includes validation cost
+        requires_review: Object.values(validatedFields).some((f: any) => f.needs_review),
         updated_at: new Date().toISOString()
       })
       .eq('id', jobData.documentId);
