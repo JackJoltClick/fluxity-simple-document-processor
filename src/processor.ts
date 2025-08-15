@@ -364,26 +364,19 @@ function extractTable(tableBlock: any, cellMap: Map<any, any>, blockMap: Map<any
 
 
 /**
- * Process document with GPT-4 using comprehensive extracted data and smart rules
+ * Process document with GPT-4 for basic extraction (no rules yet)
  */
-async function processWithGPT4(
+async function extractWithGPT4(
   documentUrl: string, 
   extractedData: ExtractedData,
-  schema?: any,
-  smartRules?: any[]
+  schema?: any
 ): Promise<ProcessedDocument> {
   console.log('🤖 Processing with GPT-4...');
   
   const isPDF = documentUrl.toLowerCase().includes('.pdf');
   const isImage = /\.(jpg|jpeg|png|webp|gif)/i.test(documentUrl.toLowerCase());
   
-  // Organize smart rules by category
-  const glRules = smartRules?.filter(r => r.category === 'gl_assignment') || [];
-  const costCenterRules = smartRules?.filter(r => r.category === 'cost_center') || [];
-  const extractionHints = smartRules?.filter(r => r.category === 'extraction_hint') || [];
-  const validationRules = smartRules?.filter(r => r.category === 'validation') || [];
-  
-  // Build system prompt with ALL extracted data AND smart rules
+  // Build system prompt for BASIC extraction only (no smart rules)
   const systemPrompt = `You are an expert document processor. Extract and map data from the document using ALL the information provided below.
 
 ${schema ? `Map to these specific fields:
@@ -399,26 +392,6 @@ ${JSON.stringify(schema.columns?.map((c: any) => c.name) || [], null, 2)}` :
 - tax_code
 - cost_center
 - gl_account`}
-
-${extractionHints.length > 0 ? `
-EXTRACTION HINTS (How to find data in this type of document):
-${extractionHints.map(rule => `- ${rule.rule_text}`).join('\n')}
-` : ''}
-
-${glRules.length > 0 ? `
-GL ASSIGNMENT RULES (Apply these rules to determine GL codes):
-${glRules.map(rule => `- ${rule.rule_text}`).join('\n')}
-` : ''}
-
-${costCenterRules.length > 0 ? `
-COST CENTER RULES (Apply these rules to determine cost centers):
-${costCenterRules.map(rule => `- ${rule.rule_text}`).join('\n')}
-` : ''}
-
-${validationRules.length > 0 ? `
-VALIDATION RULES (Ensure extracted data meets these requirements):
-${validationRules.map(rule => `- ${rule.rule_text}`).join('\n')}
-` : ''}
 
 DOCUMENT STRUCTURE:
 ${extractedData.layout.titles.length > 0 ? `- Title(s): ${extractedData.layout.titles.join(', ')}` : ''}
@@ -446,6 +419,8 @@ IMPORTANT FORMATTING RULES:
 - For multiple line items, combine them with " | " separator
 - For multiple related values, combine with ", " separator
 - Use exact field names from the schema
+- Focus on extracting raw values from the document
+- Do NOT apply business rules or make assumptions
 
 Return ONLY a JSON object with the mapped fields. No explanations.`;
 
@@ -564,6 +539,113 @@ Return ONLY a JSON object with the mapped fields. No explanations.`;
 }
 
 /**
+ * Apply Smart Rules using GPT-4 with validated fields and ERP data
+ */
+async function applySmartRulesWithGPT4(
+  validatedFields: Record<string, any>,
+  smartRules: any[],
+  clientId: string
+): Promise<Record<string, any>> {
+  console.log('🎯 Applying Smart Rules with GPT-4 and validated data...');
+  
+  // Get ERP master data for GPT-4 to use
+  const { data: erpData } = await supabase
+    .from('erp_master_data')
+    .select('*')
+    .eq('client_id', clientId)
+    .eq('is_active', true);
+  
+  // Organize ERP codes by type for GPT-4
+  const erpCodes: Record<string, any[]> = {};
+  erpData?.forEach(item => {
+    if (!erpCodes[item.data_type]) erpCodes[item.data_type] = [];
+    erpCodes[item.data_type].push({
+      code: item.code,
+      name: item.name,
+      description: item.description
+    });
+  });
+  
+  // Organize rules by category
+  const glRules = smartRules.filter(r => r.category === 'gl_assignment');
+  const costCenterRules = smartRules.filter(r => r.category === 'cost_center');
+  const validationRules = smartRules.filter(r => r.category === 'validation');
+  const extractionHints = smartRules.filter(r => r.category === 'extraction_hint');
+  
+  console.log('📝 Smart Rules to apply:', {
+    costCenterRules: costCenterRules.map(r => r.rule_text),
+    glRules: glRules.map(r => r.rule_text),
+    extractionHints: extractionHints.map(r => r.rule_text),
+    validatedVendor: validatedFields.invoicing_party
+  });
+  
+  const prompt = `Apply the following Smart Rules to this validated document data.
+
+CURRENT VALIDATED FIELDS (already matched to ERP codes):
+${JSON.stringify(validatedFields, null, 2)}
+
+AVAILABLE ERP MASTER DATA:
+${JSON.stringify(erpCodes, null, 2)}
+
+${extractionHints.length > 0 ? `
+FIELD ASSIGNMENT RULES (Apply these to set specific field values):
+${extractionHints.map(r => `- ${r.rule_text}`).join('\n')}
+` : ''}
+${costCenterRules.length > 0 ? `
+COST CENTER RULES:
+${costCenterRules.map(r => `- ${r.rule_text}`).join('\n')}
+` : ''}
+${glRules.length > 0 ? `
+GL ACCOUNT RULES:
+${glRules.map(r => `- ${r.rule_text}`).join('\n')}
+` : ''}
+${validationRules.length > 0 ? `
+VALIDATION RULES:
+${validationRules.map(r => `- ${r.rule_text}`).join('\n')}
+` : ''}
+
+IMPORTANT INSTRUCTIONS:
+1. Apply ALL applicable rules based on the validated field values
+2. When a rule says "Human Resources", find the matching code in cost_center list
+3. When a rule says "Marketing Expenses", find the matching code in gl_account list
+4. Use ONLY codes from the ERP master data provided - never invent codes
+5. The vendor field (invoicing_party) already contains the ERP code (like JACK0001), not the original name
+6. Return all fields, including ones not affected by rules
+
+Return ONLY a JSON object with all fields (both rule-applied and unchanged).`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: CONFIG.GPT4_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a business rules engine. Apply rules precisely using the provided ERP master data codes.'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.1,
+      max_tokens: 2000
+    });
+    
+    const result = safeJsonParse(completion.choices[0]?.message?.content || '{}', validatedFields);
+    console.log('✅ Smart Rules applied successfully');
+    console.log('📤 Result after Smart Rules:', {
+      cost_center: result.cost_center,
+      gl_account: result.gl_account
+    });
+    return result;
+  } catch (error) {
+    console.error('Failed to apply Smart Rules:', error);
+    return validatedFields; // Return original if rules fail
+  }
+}
+
+/**
  * Main document processing function
  */
 export async function processDocument(jobData: JobData): Promise<void> {
@@ -611,47 +693,47 @@ export async function processDocument(jobData: JobData): Promise<void> {
     // Step 1: Extract comprehensive data with Textract
     const extractedData = await extractText(jobData.fileUrl);
     
-    // Step 2: Process with GPT-4 using all extracted data AND smart rules
-    const processed = await processWithGPT4(jobData.fileUrl, extractedData, schema, smartRules || undefined);
+    // Step 2: Extract basic fields with GPT-4 (no rules yet)
+    const extracted = await extractWithGPT4(jobData.fileUrl, extractedData, schema);
+    console.log('📊 EXTRACTED FIELDS:', JSON.stringify(extracted.fields, null, 2));
     
-    // Step 3: Validate fields against ERP master data
+    // Step 3: Validate ALL fields against ERP master data
+    const clientId = jobData.clientId || '00000000-0000-0000-0000-000000000000';
     console.log('🔍 Validating fields against ERP master data...');
     
-    // Use test client ID for now (in production, get from job data or client association)
-    const clientId = jobData.clientId || '00000000-0000-0000-0000-000000000000';
-    
     const validationResults = await validationService.validateDocumentFields(
-      processed.fields,
+      extracted.fields,
       clientId
     );
     
-    // Save validation results
-    await validationService.saveValidationResults(jobData.documentId, validationResults);
+    // Apply validation results to fields
+    const validatedFields = { ...extracted.fields };
+    console.log('🔍 VALIDATION RESULTS:', JSON.stringify(validationResults, null, 2));
     
-    // Merge validation results into fields (add matched codes where confident)
-    const validatedFields = { ...processed.fields };
     for (const [fieldName, validation] of Object.entries(validationResults)) {
-      if (validation.confidence > 85 && validation.matched_code) {
-        // High confidence - use the matched code
-        validatedFields[fieldName] = {
-          value: validation.matched_code,
-          original_value: validation.extracted_value,
-          matched_name: validation.matched_name,
-          confidence: validation.confidence / 100,
-          validation_status: validation.status
-        };
-      } else if (validation.matched_code) {
-        // Lower confidence - keep original but add suggestion
-        validatedFields[fieldName] = {
-          value: validation.extracted_value,
-          suggested_code: validation.matched_code,
-          suggested_name: validation.matched_name,
-          confidence: validation.confidence / 100,
-          validation_status: validation.status,
-          needs_review: true
-        };
+      if (validation.confidence >= 85 && validation.matched_code) {
+        console.log(`✅ Validated ${fieldName}: "${validation.extracted_value}" → "${validation.matched_code}"`);
+        validatedFields[fieldName] = validation.matched_code;
       }
     }
+    
+    console.log('📝 VALIDATED FIELDS:', JSON.stringify(validatedFields, null, 2));
+    
+    // Step 4: Apply Smart Rules with validated data using GPT-4
+    let finalFields = validatedFields;
+    if (smartRules && smartRules.length > 0) {
+      console.log('🎯 Applying Smart Rules with GPT-4...');
+      console.log('📋 SMART RULES:', smartRules.map(r => ({ category: r.category, rule: r.rule_text })));
+      finalFields = await applySmartRulesWithGPT4(validatedFields, smartRules, clientId);
+      console.log('🎉 FINAL FIELDS AFTER RULES:', JSON.stringify(finalFields, null, 2));
+    }
+    
+    // Create final processed document
+    const processed = {
+      fields: finalFields,
+      confidence: extracted.confidence,
+      full_text: extracted.full_text
+    };
     
     // Update usage counts for smart rules (if any were used)
     if (smartRules && smartRules.length > 0) {
@@ -664,23 +746,21 @@ export async function processDocument(jobData: JobData): Promise<void> {
       ));
     }
     
-    // Step 4: Save results with enriched metadata and validation
+    // Step 5: Save results with enriched metadata
     const { error } = await supabase
       .from('documents')
       .update({
         status: 'completed',
-        extraction_method: 'enhanced-textract-gpt4-validation',
+        extraction_method: 'enhanced-textract-gpt4-smart-rules',
         extracted_data: {
-          fields: validatedFields,
+          fields: processed.fields,
           metadata: {
-            extraction_method: 'enhanced-textract-gpt4-validation',
+            extraction_method: 'enhanced-textract-gpt4-smart-rules',
             schema_used: schema?.name || 'default-accounting',
             smart_rules_applied: smartRules?.length || 0,
+            validation_performed: true,
             confidence: processed.confidence,
             processing_time_ms: Date.now() - startTime,
-            validation_performed: true,
-            fields_validated: Object.keys(validationResults).length,
-            fields_matched: Object.values(validationResults).filter((v: any) => v.matched_code).length,
             textract_features: {
               key_value_pairs: Object.keys(extractedData.keyValues).length,
               tables_found: extractedData.tables.length,
@@ -694,9 +774,8 @@ export async function processDocument(jobData: JobData): Promise<void> {
           }
         },
         full_text: processed.full_text,
-        accounting_status: determineStatus(validatedFields),
-        extraction_cost: 0.045, // Includes validation cost
-        requires_review: Object.values(validatedFields).some((f: any) => f.needs_review),
+        accounting_status: determineStatus(processed.fields),
+        extraction_cost: 0.04, // Slightly higher with more features
         updated_at: new Date().toISOString()
       })
       .eq('id', jobData.documentId);

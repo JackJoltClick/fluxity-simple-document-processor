@@ -304,7 +304,7 @@ export class ValidationService {
     });
 
     // If top match is good enough, use it
-    if (alternatives.length > 0 && alternatives[0].score > 85) {
+    if (alternatives.length > 0 && alternatives[0].score >= 85) {
       return {
         field: fieldName,
         extracted_value: actualValue,
@@ -454,9 +454,16 @@ export class ValidationService {
       alternative_matches: result.alternatives
     }));
 
+    // First, delete existing validations for this document
+    await this.supabase
+      .from('field_validations')
+      .delete()
+      .eq('document_id', documentId);
+    
+    // Then insert new validations
     const { error } = await this.supabase
       .from('field_validations')
-      .upsert(records, { onConflict: 'document_id,field_name' });
+      .insert(records);
 
     if (error) {
       console.error('Error saving validation results:', error);
