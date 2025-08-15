@@ -575,8 +575,8 @@ async function applySmartRulesWithGPT4(
   
   // Organize rules by category
   const extractionRules = smartRules.filter(r => r.category === 'extraction');
-  const assignmentRules = smartRules.filter(r => r.category === 'assignment' || r.category === 'extraction_hint'); // Support old extraction_hint for backward compatibility
-  const matchingRules = smartRules.filter(r => r.category === 'matching' || r.category === 'gl_assignment' || r.category === 'cost_center'); // Support old categories
+  const assignmentRules = smartRules.filter(r => r.category === 'assignment');
+  const matchingRules = smartRules.filter(r => r.category === 'matching');
   
   console.log('📝 Smart Rules to apply:', {
     extractionRules: extractionRules.map(r => r.rule_text),
