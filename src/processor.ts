@@ -364,20 +364,27 @@ function extractTable(tableBlock: any, cellMap: Map<any, any>, blockMap: Map<any
 
 
 /**
- * Process document with GPT-4 for basic extraction (no rules yet)
+ * Process document with GPT-4 for basic extraction (with extraction rules)
  */
 async function extractWithGPT4(
   documentUrl: string, 
   extractedData: ExtractedData,
-  schema?: any
+  schema?: any,
+  extractionRules?: any[]
 ): Promise<ProcessedDocument> {
   console.log('🤖 Processing with GPT-4...');
   
   const isPDF = documentUrl.toLowerCase().includes('.pdf');
   const isImage = /\.(jpg|jpeg|png|webp|gif)/i.test(documentUrl.toLowerCase());
   
-  // Build system prompt for BASIC extraction only (no smart rules)
+  // Build system prompt with extraction rules if provided
   const systemPrompt = `You are an expert document processor. Extract and map data from the document using ALL the information provided below.
+
+${extractionRules && extractionRules.length > 0 ? `EXTRACTION RULES (How to find and read data):
+${extractionRules.map(r => `- ${r.rule_text}`).join('\n')}
+
+Apply these rules when extracting data from the document.
+` : ''}
 
 ${schema ? `Map to these specific fields:
 ${JSON.stringify(schema.columns?.map((c: any) => c.name) || [], null, 2)}` : 
@@ -567,15 +574,14 @@ async function applySmartRulesWithGPT4(
   });
   
   // Organize rules by category
-  const glRules = smartRules.filter(r => r.category === 'gl_assignment');
-  const costCenterRules = smartRules.filter(r => r.category === 'cost_center');
-  const validationRules = smartRules.filter(r => r.category === 'validation');
-  const extractionHints = smartRules.filter(r => r.category === 'extraction_hint');
+  const extractionRules = smartRules.filter(r => r.category === 'extraction');
+  const assignmentRules = smartRules.filter(r => r.category === 'assignment' || r.category === 'extraction_hint'); // Support old extraction_hint for backward compatibility
+  const matchingRules = smartRules.filter(r => r.category === 'matching' || r.category === 'gl_assignment' || r.category === 'cost_center'); // Support old categories
   
   console.log('📝 Smart Rules to apply:', {
-    costCenterRules: costCenterRules.map(r => r.rule_text),
-    glRules: glRules.map(r => r.rule_text),
-    extractionHints: extractionHints.map(r => r.rule_text),
+    extractionRules: extractionRules.map(r => r.rule_text),
+    assignmentRules: assignmentRules.map(r => r.rule_text),
+    matchingRules: matchingRules.map(r => r.rule_text),
     validatedVendor: validatedFields.invoicing_party
   });
   
@@ -587,30 +593,23 @@ ${JSON.stringify(validatedFields, null, 2)}
 AVAILABLE ERP MASTER DATA:
 ${JSON.stringify(erpCodes, null, 2)}
 
-${extractionHints.length > 0 ? `
-FIELD ASSIGNMENT RULES (Apply these to set specific field values):
-${extractionHints.map(r => `- ${r.rule_text}`).join('\n')}
+${assignmentRules.length > 0 ? `
+ASSIGNMENT RULES (Direct field overrides - use the EXACT value specified):
+${assignmentRules.map(r => `- ${r.rule_text}`).join('\n')}
 ` : ''}
-${costCenterRules.length > 0 ? `
-COST CENTER RULES:
-${costCenterRules.map(r => `- ${r.rule_text}`).join('\n')}
-` : ''}
-${glRules.length > 0 ? `
-GL ACCOUNT RULES:
-${glRules.map(r => `- ${r.rule_text}`).join('\n')}
-` : ''}
-${validationRules.length > 0 ? `
-VALIDATION RULES:
-${validationRules.map(r => `- ${r.rule_text}`).join('\n')}
+${matchingRules.length > 0 ? `
+MATCHING RULES (Business logic - find the matching code in ERP master data):
+${matchingRules.map(r => `- ${r.rule_text}`).join('\n')}
 ` : ''}
 
 IMPORTANT INSTRUCTIONS:
 1. Apply ALL applicable rules based on the validated field values
-2. When a rule says "Human Resources", find the matching code in cost_center list
-3. When a rule says "Marketing Expenses", find the matching code in gl_account list
-4. Use ONLY codes from the ERP master data provided - never invent codes
-5. The vendor field (invoicing_party) already contains the ERP code (like JACK0001), not the original name
-6. Return all fields, including ones not affected by rules
+2. For ASSIGNMENT RULES: Apply the EXACT value specified in the rule, even if it's not in ERP data
+3. For MATCHING RULES: Find the matching code in the appropriate ERP master data list
+4. When a rule says "Human Resources", find the matching code in cost_center list  
+5. When a rule says "IT Expenses", find the matching code in gl_account list
+6. The vendor field (invoicing_party) already contains the ERP code (like JACK0001), not the original name
+7. Return all fields, including ones not affected by rules
 
 Return ONLY a JSON object with all fields (both rule-applied and unchanged).`;
 
@@ -693,8 +692,11 @@ export async function processDocument(jobData: JobData): Promise<void> {
     // Step 1: Extract comprehensive data with Textract
     const extractedData = await extractText(jobData.fileUrl);
     
-    // Step 2: Extract basic fields with GPT-4 (no rules yet)
-    const extracted = await extractWithGPT4(jobData.fileUrl, extractedData, schema);
+    // Filter extraction rules to pass to first GPT-4 call
+    const extractionRules = smartRules?.filter(r => r.category === 'extraction' && r.is_active) || [];
+    
+    // Step 2: Extract fields with GPT-4 (WITH extraction rules)
+    const extracted = await extractWithGPT4(jobData.fileUrl, extractedData, schema, extractionRules);
     console.log('📊 EXTRACTED FIELDS:', JSON.stringify(extracted.fields, null, 2));
     
     // Step 3: Validate ALL fields against ERP master data
